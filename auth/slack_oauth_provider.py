@@ -55,6 +55,7 @@ class SlackOAuthProvider(InMemoryOAuthProvider):
         slack_client_secret: str,
         slack_redirect_uri: str,
         slack_scopes: list[str],
+        slack_team_id: str | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -62,6 +63,10 @@ class SlackOAuthProvider(InMemoryOAuthProvider):
         self._slack_client_secret = slack_client_secret
         self._slack_redirect_uri = slack_redirect_uri
         self._slack_scopes = slack_scopes
+        # Optional Slack workspace (team) ID. When set, the authorize URL pins
+        # the OAuth flow to this workspace so a multi-tenant deployment routes
+        # each mount to its intended workspace deterministically.
+        self._slack_team_id = slack_team_id
 
         # internal_state -> {client_id, redirect_uri, state, code_challenge, scopes, created_at}
         self._pending_authorizations: dict[str, dict] = {}
@@ -143,6 +148,11 @@ class SlackOAuthProvider(InMemoryOAuthProvider):
             f"&redirect_uri={quote(self._slack_redirect_uri, safe='')}"
             f"&state={quote(internal_state, safe='')}"
         )
+        # Pin to a specific workspace when configured, so multi-tenant mounts
+        # route each operator to the intended workspace instead of relying on
+        # whichever workspace Slack's picker defaults to.
+        if self._slack_team_id:
+            slack_auth_url += f"&team={quote(self._slack_team_id, safe='')}"
 
         logger.info("Redirecting to Slack OAuth for client %s", client.client_id)
         return slack_auth_url

@@ -24,3 +24,5 @@ token.json
 
 # Logs
 *.log
+.env.b
+.env.tenants
