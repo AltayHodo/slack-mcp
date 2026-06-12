@@ -21,11 +21,22 @@ from urllib.parse import quote
 from fastmcp.server.auth.auth import AccessToken as FastMCPAccessToken
 from fastmcp.server.auth.providers.in_memory import InMemoryOAuthProvider
 from mcp.server.auth.provider import (
+    AccessToken,
     AuthorizationCode,
     AuthorizationParams,
+    RefreshToken,
     construct_redirect_uri,
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+from auth.token_store import (
+    KIND_ACCESS_TOKEN,
+    KIND_CLIENT,
+    KIND_REFRESH_TOKEN,
+    KIND_SLACK_TOKEN,
+    KIND_TOKEN_LINK,
+    TokenStore,
+)
 from slack_sdk import WebClient
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
@@ -56,6 +67,8 @@ class SlackOAuthProvider(InMemoryOAuthProvider):
         slack_redirect_uri: str,
         slack_scopes: list[str],
         slack_team_id: str | None = None,
+        tenant_id: str = "",
+        token_store: TokenStore | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -74,6 +87,142 @@ class SlackOAuthProvider(InMemoryOAuthProvider):
         self._slack_tokens: dict[str, dict] = {}
         # TTL for pending authorizations and code-keyed slack tokens (10 minutes)
         self._pending_ttl = 600
+
+        # Optional write-through persistence. The in-memory dicts above (and
+        # the parent's) remain the runtime source of truth; the store mirrors
+        # long-lived state so restarts don't wipe client registrations and
+        # tokens. None disables persistence (current in-memory behavior).
+        self._tenant_id = tenant_id
+        self._token_store = token_store
+        self._hydrate_from_store()
+
+    # ----- persistence helpers -------------------------------------------
+
+    def _db_put(self, kind: str, key: str, value: str, expires_at: float | None = None):
+        if self._token_store is not None:
+            self._token_store.put(self._tenant_id, kind, key, value, expires_at)
+
+    def _db_delete(self, kind: str, key: str):
+        if self._token_store is not None:
+            self._token_store.delete(self._tenant_id, kind, key)
+
+    def _hydrate_from_store(self):
+        """Load persisted OAuth state into the in-memory dicts at startup."""
+        store = self._token_store
+        if store is None:
+            return
+        now = time.time()
+
+        for key, raw in store.get_all(self._tenant_id, KIND_CLIENT).items():
+            self.clients[key] = OAuthClientInformationFull.model_validate_json(raw)
+
+        for key, raw in store.get_all(self._tenant_id, KIND_ACCESS_TOKEN).items():
+            token = AccessToken.model_validate_json(raw)
+            if token.expires_at is not None and token.expires_at < now:
+                continue  # row is removed by purge_expired
+            self.access_tokens[key] = token
+
+        for key, raw in store.get_all(self._tenant_id, KIND_REFRESH_TOKEN).items():
+            token = RefreshToken.model_validate_json(raw)
+            if token.expires_at is not None and token.expires_at < now:
+                continue
+            self.refresh_tokens[key] = token
+
+        # Rebuild both link maps even when the access token itself has
+        # expired: the refresh flow uses refresh -> access to find the old
+        # Slack token, mirroring the in-memory "refreshable" semantics in
+        # _cleanup_expired. Links whose refresh token is gone are dead —
+        # drop their rows so they don't accumulate.
+        for access_key, refresh_key in store.get_all(self._tenant_id, KIND_TOKEN_LINK).items():
+            if refresh_key in self.refresh_tokens:
+                self._access_to_refresh_map[access_key] = refresh_key
+                self._refresh_to_access_map[refresh_key] = access_key
+            else:
+                store.delete(self._tenant_id, KIND_TOKEN_LINK, access_key)
+
+        # Keep Slack tokens still reachable via a live access token or a
+        # refreshable link (same retention rule as _cleanup_expired).
+        refreshable = set(self._refresh_to_access_map.values())
+        for key, raw in store.get_all(self._tenant_id, KIND_SLACK_TOKEN).items():
+            if key in self.access_tokens or key in refreshable:
+                self._slack_tokens[key] = json.loads(raw)
+            else:
+                store.delete(self._tenant_id, KIND_SLACK_TOKEN, key)
+
+        logger.info(
+            "Tenant '%s': hydrated %d client(s), %d access token(s), "
+            "%d refresh token(s), %d Slack token(s) from %s",
+            self._tenant_id or "default",
+            len(self.clients),
+            len(self.access_tokens),
+            len(self.refresh_tokens),
+            len(self._slack_tokens),
+            store.db_path,
+        )
+
+    def _persist_issued_tokens(self, oauth_token: OAuthToken):
+        """Mirror a freshly issued access/refresh token pair to the store."""
+        access = self.access_tokens.get(oauth_token.access_token)
+        if access is not None:
+            self._db_put(
+                KIND_ACCESS_TOKEN,
+                access.token,
+                access.model_dump_json(),
+                expires_at=access.expires_at,
+            )
+        refresh = (
+            self.refresh_tokens.get(oauth_token.refresh_token)
+            if oauth_token.refresh_token
+            else None
+        )
+        if refresh is not None:
+            self._db_put(
+                KIND_REFRESH_TOKEN,
+                refresh.token,
+                refresh.model_dump_json(),
+                expires_at=refresh.expires_at,
+            )
+            self._db_put(KIND_TOKEN_LINK, oauth_token.access_token, refresh.token)
+
+    # ----- OAuth provider overrides ---------------------------------------
+
+    async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        """Register a client and persist the registration.
+
+        Persisting DCR registrations is the core restart fix: MCP clients
+        cache their client_id, and when a restarted server forgets it the
+        only client-side recovery is re-adding the connector under a new
+        name. UPSERT also covers RFC 7591 re-registration.
+        """
+        await super().register_client(client_info)
+        if client_info.client_id is not None:
+            self._db_put(KIND_CLIENT, client_info.client_id, client_info.model_dump_json())
+
+    def _revoke_internal(
+        self, access_token_str: str | None = None, refresh_token_str: str | None = None
+    ):
+        """Revoke tokens and mirror the deletions to the store.
+
+        Single choke point: the parent routes explicit revocation, refresh
+        rotation, and lazy expiry cleanup through here. The full pair must
+        be resolved from the link maps BEFORE super() pops them.
+        """
+        access = access_token_str or (
+            self._refresh_to_access_map.get(refresh_token_str) if refresh_token_str else None
+        )
+        refresh = refresh_token_str or (
+            self._access_to_refresh_map.get(access_token_str) if access_token_str else None
+        )
+
+        super()._revoke_internal(
+            access_token_str=access_token_str, refresh_token_str=refresh_token_str
+        )
+
+        if access:
+            self._db_delete(KIND_ACCESS_TOKEN, access)
+            self._db_delete(KIND_TOKEN_LINK, access)
+        if refresh:
+            self._db_delete(KIND_REFRESH_TOKEN, refresh)
 
     def _cleanup_expired(self):
         """Remove expired pending authorizations and stale Slack tokens."""
@@ -105,6 +254,10 @@ class SlackOAuthProvider(InMemoryOAuthProvider):
         ]
         for k in expired_access:
             del self._slack_tokens[k]
+            self._db_delete(KIND_SLACK_TOKEN, k)
+
+        if self._token_store is not None:
+            self._token_store.purge_expired()
 
         total_cleaned = len(expired_pending) + len(expired_codes) + len(expired_access)
         if total_cleaned:
@@ -342,6 +495,9 @@ class SlackOAuthProvider(InMemoryOAuthProvider):
         if slack_info:
             self._slack_tokens.pop(code_key, None)
             self._slack_tokens[oauth_token.access_token] = slack_info
+            # code:-keyed entries are never persisted, so there is no DB
+            # delete to mirror — only the access-token-keyed association.
+            self._db_put(KIND_SLACK_TOKEN, oauth_token.access_token, json.dumps(slack_info))
             logger.debug(
                 "Associated Slack token for user %s with MCP access token",
                 slack_info.get("user_id"),
@@ -352,6 +508,7 @@ class SlackOAuthProvider(InMemoryOAuthProvider):
                 authorization_code.code[:8] + "...",
             )
 
+        self._persist_issued_tokens(oauth_token)
         return oauth_token
 
     async def exchange_refresh_token(
@@ -378,7 +535,9 @@ class SlackOAuthProvider(InMemoryOAuthProvider):
         if old_slack_info:
             if old_access_token:
                 self._slack_tokens.pop(old_access_token, None)
+                self._db_delete(KIND_SLACK_TOKEN, old_access_token)
             self._slack_tokens[oauth_token.access_token] = old_slack_info
+            self._db_put(KIND_SLACK_TOKEN, oauth_token.access_token, json.dumps(old_slack_info))
             logger.debug(
                 "Transferred Slack token for user %s to new MCP access token",
                 old_slack_info.get("user_id"),
@@ -388,6 +547,9 @@ class SlackOAuthProvider(InMemoryOAuthProvider):
                 "No Slack token found during refresh — new MCP token will lack Slack access"
             )
 
+        # super() already revoked the old pair via our _revoke_internal
+        # override, which mirrored those deletions to the store.
+        self._persist_issued_tokens(oauth_token)
         return oauth_token
 
     async def load_access_token(self, token: str):

@@ -18,6 +18,7 @@ from importlib import metadata
 
 import slack_tools
 from auth.oauth_config import SlackOAuthConfig, load_tenants
+from auth.token_store import TokenStore, create_token_store_from_env
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from fastmcp import FastMCP
@@ -206,7 +207,9 @@ def register_tools(server: FastMCP) -> None:
         return slack_tools.get_channels(channel_id, types, limit, cursor, include_members, compact)
 
 
-def configure_oauth(server: FastMCP, config: SlackOAuthConfig) -> bool:
+def configure_oauth(
+    server: FastMCP, config: SlackOAuthConfig, token_store: TokenStore | None = None
+) -> bool:
     """
     Configure the OAuth 2.1 authentication provider for one tenant's server.
     Must be called BEFORE building the tenant's http_app.
@@ -233,6 +236,8 @@ def configure_oauth(server: FastMCP, config: SlackOAuthConfig) -> bool:
         slack_redirect_uri=config.get_slack_callback_url(),
         slack_scopes=config.scopes,
         slack_team_id=config.team_id,
+        tenant_id=config.tenant_id,
+        token_store=token_store,
         base_url=config.get_oauth_base_url(),
         required_scopes=sorted(config.scopes),
         client_registration_options=ClientRegistrationOptions(
@@ -252,12 +257,12 @@ def configure_oauth(server: FastMCP, config: SlackOAuthConfig) -> bool:
     return True
 
 
-def build_tenant_app(config: SlackOAuthConfig):
+def build_tenant_app(config: SlackOAuthConfig, token_store: TokenStore | None = None):
     """Build a mountable Starlette app for one tenant."""
     name = f"Slack MCP Server [{config.tenant_id or 'default'}]"
     server = FastMCP(name)
     register_tools(server)
-    configure_oauth(server, config)
+    configure_oauth(server, config, token_store)
     # Each tenant serves its MCP endpoint at <prefix>/mcp once mounted.
     return server.http_app(path="/mcp", transport="streamable-http")
 
@@ -294,10 +299,15 @@ def build_app() -> Starlette:
     """
     tenants = load_tenants()
 
+    # One shared store for all tenants (rows are namespaced by tenant_id).
+    # A misconfigured store (missing/wrong encryption key) raises here so
+    # the server fails at boot instead of silently running without state.
+    token_store = create_token_store_from_env()
+
     routes = []
     tenant_apps = []
     for config in tenants:
-        app = build_tenant_app(config)
+        app = build_tenant_app(config, token_store)
         tenant_apps.append(app)
         # Empty prefix (legacy single tenant) mounts at root.
         mount_path = config.path_prefix or ""
@@ -367,6 +377,9 @@ def main():
     safe_print(f"   📦 Version: {version}")
     safe_print("   🌐 Transport: HTTP (streamable)")
     safe_print(f"   🐍 Python: {sys.version.split()[0]}")
+    db_path = os.getenv("SLACK_MCP_DB_PATH", "./data/slack-mcp.db")
+    persistence = f"enabled ({db_path})" if db_path else "DISABLED — state lost on restart"
+    safe_print(f"   💾 Persistence: {persistence}")
     safe_print(f"   🏢 Tenants: {len(tenants)}")
     for config in tenants:
         status = "configured" if config.is_configured() else "NOT CONFIGURED"

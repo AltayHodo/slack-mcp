@@ -58,6 +58,8 @@ export SLACK_MCP_BASE_URI="http://localhost"
 export SLACK_EXTERNAL_URL="https://abc123.ngrok.io"
 # Optional, if you want to run the MCP server on a different port.
 export SLACK_MCP_PORT=8001
+# Required: encrypts persisted OAuth state at rest (see Persistence below).
+export SLACK_MCP_ENCRYPTION_KEY="$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
 ```
 
 ### 5. Run the Server
@@ -84,17 +86,38 @@ Add to your MCP client configuration (e.g. ~/.cursor/mcp.json for Cursor):
 
 Authentication happens automatically via OAuth 2.1 when your MCP client first connects. Your client will open a browser window for Slack authorization — approve access and you're ready to go.
 
+## Persistence
+
+OAuth state — DCR client registrations, MCP access/refresh tokens, and the
+Slack user tokens they map to — is persisted to a SQLite database so server
+restarts don't log everyone out (or worse, invalidate the client registration
+MCP clients cache, which forces users to re-add the connector under a new
+name). Values are encrypted at rest with a Fernet key.
+
+- `SLACK_MCP_ENCRYPTION_KEY` (required): generate with
+  `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+  If the key is lost, delete the database and users re-authenticate once.
+- `SLACK_MCP_DB_PATH` (optional): database file path, default
+  `./data/slack-mcp.db`. Set to an empty string to disable persistence.
+
+What does NOT survive a restart: in-flight OAuth flows (pending
+authorizations and unredeemed auth codes) — anyone mid-flow just restarts
+the browser flow.
+
 ## Deployment
 
-For production deployment, you can run it inside docker:
+For production deployment, you can run it inside docker. Mount a volume at
+`/app/data` so the OAuth state database outlives container replacement:
 
 ```bash
 docker build -t slack-mcp .
 docker run -p 8001:8001 \
+  -v slack-mcp-data:/app/data \
   -e SLACK_CLIENT_ID="your_client_id" \
   -e SLACK_CLIENT_SECRET="your_client_secret" \
   -e SLACK_MCP_BASE_URI="https://your-domain.com" \
   -e SLACK_EXTERNAL_URL="https://your-domain.com" \
+  -e SLACK_MCP_ENCRYPTION_KEY="your_fernet_key" \
   slack-mcp
 ```
 

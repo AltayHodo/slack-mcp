@@ -16,7 +16,7 @@ source .env.tenants
 set +a
 
 missing=0
-for var in SLACK_EXTERNAL_URL SLACK_TENANTS; do
+for var in SLACK_EXTERNAL_URL SLACK_TENANTS SLACK_MCP_ENCRYPTION_KEY; do
   if [ -z "${!var:-}" ]; then echo "Missing $var in .env.tenants"; missing=1; fi
 done
 [ "$missing" -eq 0 ] || exit 1

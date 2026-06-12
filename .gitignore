@@ -22,6 +22,9 @@ venv/
 .credentials/
 token.json
 
+# OAuth state database
+data/
+
 # Logs
 *.log
 .env.b

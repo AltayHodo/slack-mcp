@@ -18,6 +18,13 @@ COPY . .
 # Install dependencies
 RUN uv --quiet sync --frozen
 
+# OAuth state database lives here (SLACK_MCP_DB_PATH defaults to
+# ./data/slack-mcp.db). Mount a volume at /app/data and pass
+# SLACK_MCP_ENCRYPTION_KEY, or state is lost on container replacement:
+#   docker run -v slack-mcp-data:/app/data -e SLACK_MCP_ENCRYPTION_KEY=... slack-mcp
+RUN mkdir -p /app/data
+VOLUME /app/data
+
 # Expose port for HTTP transport
 EXPOSE 8001
 
