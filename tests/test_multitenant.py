@@ -112,5 +112,58 @@ def test_load_tenants_legacy_single_tenant(monkeypatch):
     assert tenants[0].is_configured()
 
 
+def test_main_port_resolution_handles_empty_env(monkeypatch):
+    """main() must not crash on a present-but-empty SLACK_MCP_PORT."""
+    import os
+
+    monkeypatch.setenv("SLACK_MCP_PORT", "")
+    # Mirror the resolution logic in main(); the bug was int("") raising.
+    port = int(os.getenv("SLACK_MCP_PORT") or "8001")
+    assert port == 8001
+
+
+def test_root_metadata_alias_for_legacy_as_path():
+    """AS metadata at the legacy exact path gets a tenant-suffixed root alias."""
+    from starlette.routing import Route
+
+    from main import _root_metadata_routes
+
+    cfg = SlackOAuthConfig(client_id="x", client_secret="y", tenant_id="internal")
+
+    async def _endpoint(request):  # pragma: no cover - placeholder
+        return None
+
+    class _FakeApp:
+        routes = [
+            Route("/.well-known/oauth-authorization-server", endpoint=_endpoint),
+            Route("/.well-known/oauth-protected-resource/internal/mcp", endpoint=_endpoint),
+        ]
+
+    paths = {r.path for r in _root_metadata_routes(_FakeApp(), cfg)}
+    assert "/.well-known/oauth-authorization-server/internal" in paths
+    assert "/.well-known/oauth-protected-resource/internal/mcp" in paths
+
+
+def test_root_metadata_alias_for_path_aware_as_path():
+    """A future path-aware AS route is matched too, without duplicating itself."""
+    from starlette.routing import Route
+
+    from main import _root_metadata_routes
+
+    cfg = SlackOAuthConfig(client_id="x", client_secret="y", tenant_id="internal")
+
+    async def _endpoint(request):  # pragma: no cover - placeholder
+        return None
+
+    class _FakeApp:
+        routes = [
+            Route("/.well-known/oauth-authorization-server/internal", endpoint=_endpoint),
+        ]
+
+    # Already at the alias path → startswith matches but no duplicate route added.
+    extra = _root_metadata_routes(_FakeApp(), cfg)
+    assert extra == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

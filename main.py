@@ -281,11 +281,19 @@ def _root_metadata_routes(app, config: SlackOAuthConfig) -> list[Route]:
         if path.startswith("/.well-known/oauth-protected-resource"):
             # Advertised at root verbatim (resource path already embedded).
             extra.append(Route(path, endpoint=route.endpoint, methods=list(methods or ["GET"])))
-        elif path == "/.well-known/oauth-authorization-server":
+        elif path.startswith("/.well-known/oauth-authorization-server"):
             # RFC 8414 root-inserted form: /.well-known/oauth-authorization-server/<tenant>.
             # (Clients also try the path-relative form served under the mount.)
+            #
+            # fastmcp 2.13.x registers the legacy exact path
+            # (/.well-known/oauth-authorization-server); a future version may
+            # instead register the path-aware form already suffixed with the
+            # tenant. startswith() matches both so a fastmcp upgrade can't
+            # silently drop the root alias. Re-register under the tenant alias
+            # unless it's already there (avoid a duplicate-route collision).
             alias = f"/.well-known/oauth-authorization-server/{config.tenant_id}"
-            extra.append(Route(alias, endpoint=route.endpoint, methods=list(methods or ["GET"])))
+            if path != alias:
+                extra.append(Route(alias, endpoint=route.endpoint, methods=list(methods or ["GET"])))
     return extra
 
 
@@ -368,7 +376,9 @@ def main():
     """Main entry point for the Slack MCP server."""
     import uvicorn
 
-    port = int(os.getenv("SLACK_MCP_PORT", "8001"))
+    # Empty-safe: a present-but-empty SLACK_MCP_PORT would make int("") crash
+    # before uvicorn starts (matches the fallback in SlackOAuthConfig).
+    port = int(os.getenv("SLACK_MCP_PORT") or "8001")
 
     try:
         version = metadata.version("slack-mcp")
