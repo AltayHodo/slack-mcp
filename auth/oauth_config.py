@@ -65,7 +65,10 @@ class SlackOAuthConfig:
         # Base server configuration (fall back to env for backward compatibility)
         raw_base = base_uri if base_uri is not None else os.getenv("SLACK_MCP_BASE_URI", "http://localhost")
         self.base_uri = raw_base.rstrip("/")
-        self.port = int(port) if port is not None else int(os.getenv("SLACK_MCP_PORT", "8001"))
+        # Treat an unset OR empty SLACK_MCP_PORT as "use the default" — a
+        # present-but-empty env var would otherwise make int("") crash at boot.
+        raw_port = port if port is not None else os.getenv("SLACK_MCP_PORT")
+        self.port = int(raw_port) if raw_port else 8001
 
         # Determine host base URL (with port if not already specified in base_uri).
         # Only append port for non-standard scheme/port combos (e.g. http://localhost

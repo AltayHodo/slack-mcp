@@ -17,10 +17,20 @@ ENV = pathlib.Path(".env.tenants")
 TENANT_IDS = ["internal", "fellow-facing"]
 
 
+# Keys this script owns and rewrites; every other line is preserved verbatim.
+MANAGED_PREFIXES = ("SLACK_EXTERNAL_URL=", "SLACK_MCP_PORT=", "SLACK_TENANTS=")
+
+
 def read_existing():
-    """Return (external_url, port, {tenant_id: entry_dict}) from .env.tenants."""
+    """Return (external_url, port, {tenant_id: entry_dict}, other_lines).
+
+    `other_lines` holds every line this script does not manage (e.g.
+    SLACK_MCP_ENCRYPTION_KEY, SLACK_MCP_DB_PATH, comments) so they survive a
+    rewrite — dropping the encryption key would orphan the existing database.
+    """
     external_url, port = "", "8001"
     by_id = {}
+    other_lines = []
     if ENV.exists():
         for line in ENV.read_text().splitlines():
             if line.startswith("SLACK_EXTERNAL_URL="):
@@ -35,7 +45,9 @@ def read_existing():
                             by_id[t["id"]] = t
                 except json.JSONDecodeError:
                     pass
-    return external_url, port, by_id
+            elif line.strip():
+                other_lines.append(line)
+    return external_url, port, by_id, other_lines
 
 
 def _mask(val, keep=12):
@@ -59,7 +71,7 @@ def prompt_secret_keep(label, current):
 
 
 def main():
-    external_url, port, existing = read_existing()
+    external_url, port, existing, other_lines = read_existing()
     if not external_url:
         external_url = input("SLACK_EXTERNAL_URL (tunnel/host, no trailing slash): ").strip()
 
@@ -84,6 +96,10 @@ def main():
         f"SLACK_MCP_PORT={port}\n"
         f"SLACK_TENANTS='{json.dumps(tenants)}'\n"
     )
+    # Re-emit preserved lines (encryption key, db path, comments) so a routine
+    # credential update never strips them.
+    if other_lines:
+        content += "\n" + "\n".join(other_lines) + "\n"
     ENV.write_text(content)
 
     print(f"Wrote {ENV} with {len(tenants)} tenants.")

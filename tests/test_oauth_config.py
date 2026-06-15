@@ -66,5 +66,14 @@ def test_explicit_port_in_uri_preserved(monkeypatch):
     assert config.base_url == "https://mcp.example:9090"
 
 
+def test_empty_port_env_falls_back_to_default(monkeypatch):
+    """A present-but-empty SLACK_MCP_PORT must not crash int() at boot."""
+    monkeypatch.setenv("SLACK_MCP_PORT", "")
+    monkeypatch.delenv("SLACK_EXTERNAL_URL", raising=False)
+
+    config = SlackOAuthConfig(client_id="x", client_secret="y")
+    assert config.port == 8001
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

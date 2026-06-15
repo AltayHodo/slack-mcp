@@ -306,6 +306,17 @@ def build_app() -> Starlette:
 
     routes = []
     tenant_apps = []
+
+    async def health_check(request: Request):
+        """Health check endpoint for load balancer."""
+        return JSONResponse({"status": "healthy", "tenants": len(tenant_apps)})
+
+    # Register /health BEFORE the tenant mounts. Starlette matches routes in
+    # definition order, and in legacy single-tenant mode a tenant mounts at ""
+    # (root), which would otherwise swallow every path — including this one —
+    # and the load balancer's health checks would 404.
+    routes.append(Route("/health", endpoint=health_check, methods=["GET"]))
+
     for config in tenants:
         app = build_tenant_app(config, token_store)
         tenant_apps.append(app)
@@ -330,12 +341,6 @@ def build_app() -> Starlette:
             mount_path or "/",
             config.mcp_path,
         )
-
-    async def health_check(request: Request):
-        """Health check endpoint for load balancer."""
-        return JSONResponse({"status": "healthy", "tenants": len(tenant_apps)})
-
-    routes.append(Route("/health", endpoint=health_check, methods=["GET"]))
 
     @asynccontextmanager
     async def lifespan(app):
