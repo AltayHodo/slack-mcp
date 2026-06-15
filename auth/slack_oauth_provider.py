@@ -405,6 +405,26 @@ class SlackOAuthProvider(InMemoryOAuthProvider):
                     pending, "server_error", "Slack did not return a valid user token or user ID"
                 )
 
+            # Enforce the workspace pin server-side. The &team= hint on the
+            # authorize URL only steers Slack's consent UI; it does not
+            # guarantee the user authorized in the intended workspace. When a
+            # tenant pins a team_id, reject a token minted in any other
+            # workspace (fail closed if the team is absent) so a mount can
+            # never broker the wrong workspace.
+            if self._slack_team_id:
+                returned_team_id = (response.get("team") or {}).get("id")
+                if returned_team_id != self._slack_team_id:
+                    logger.error(
+                        "Workspace mismatch: token authorized in team %s but tenant pins %s",
+                        returned_team_id or "<none>",
+                        self._slack_team_id,
+                    )
+                    return self._error_redirect(
+                        pending,
+                        "access_denied",
+                        "Authorized in the wrong Slack workspace for this connector.",
+                    )
+
             logger.info("Got Slack token for user %s", slack_user_id)
 
         except Exception as e:

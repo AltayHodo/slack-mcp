@@ -112,6 +112,18 @@ def test_load_tenants_legacy_single_tenant(monkeypatch):
     assert tenants[0].is_configured()
 
 
+def test_load_tenants_rejects_non_array(monkeypatch):
+    monkeypatch.setenv("SLACK_TENANTS", '{"id": "internal"}')  # object, not array
+    with pytest.raises(ValueError, match="must be a JSON array"):
+        load_tenants()
+
+
+def test_load_tenants_rejects_non_object_entry(monkeypatch):
+    monkeypatch.setenv("SLACK_TENANTS", '["internal", "fellow-facing"]')  # strings, not objects
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        load_tenants()
+
+
 def test_main_port_resolution_handles_empty_env(monkeypatch):
     """main() must not crash on a present-but-empty SLACK_MCP_PORT."""
     import os

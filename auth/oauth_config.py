@@ -165,9 +165,23 @@ def load_tenants() -> list[SlackOAuthConfig]:
         except json.JSONDecodeError as exc:
             raise ValueError(f"SLACK_TENANTS is not valid JSON: {exc}") from exc
 
+        # Validate the shape before iterating so a non-array (object, string,
+        # null, number) yields a clear config error instead of a cryptic
+        # TypeError/AttributeError at startup.
+        if not isinstance(entries, list):
+            raise ValueError(
+                "SLACK_TENANTS must be a JSON array of tenant objects, "
+                f"got {type(entries).__name__}"
+            )
+
         tenants = []
         seen_ids = set()
         for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    "Each SLACK_TENANTS entry must be a JSON object, "
+                    f"got {type(entry).__name__}"
+                )
             tenant_id = (entry.get("id") or "").strip("/")
             if not tenant_id:
                 raise ValueError("Every SLACK_TENANTS entry needs a non-empty 'id'")
