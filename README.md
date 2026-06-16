@@ -89,16 +89,28 @@ Authentication happens automatically via OAuth 2.1 when your MCP client first co
 ## Persistence
 
 OAuth state — DCR client registrations, MCP access/refresh tokens, and the
-Slack user tokens they map to — is persisted to a SQLite database so server
-restarts don't log everyone out (or worse, invalidate the client registration
-MCP clients cache, which forces users to re-add the connector under a new
-name). Values are encrypted at rest with a Fernet key.
+Slack user tokens they map to — is persisted so server restarts don't log
+everyone out (or worse, invalidate the client registration MCP clients cache,
+which forces users to re-add the connector under a new name). Values are
+encrypted at rest with a Fernet key regardless of backend.
 
-- `SLACK_MCP_ENCRYPTION_KEY` (required): generate with
+Two backends are supported, selected by environment:
+
+- **Postgres** (production) — set `SLACK_MCP_DATABASE_URL` to a libpq
+  connection string. Use this for any hosted/multi-replica deployment; state
+  lives in a managed database (e.g. GCP Cloud SQL), not in the container.
+- **SQLite** (local dev / single instance) — used when `SLACK_MCP_DATABASE_URL`
+  is unset. `SLACK_MCP_DB_PATH` sets the file path (default
+  `./data/slack-mcp.db`); requires a persistent volume in a container.
+
+Settings:
+
+- `SLACK_MCP_ENCRYPTION_KEY` (required for either backend): generate with
   `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
-  If the key is lost, delete the database and users re-authenticate once.
-- `SLACK_MCP_DB_PATH` (optional): database file path, default
-  `./data/slack-mcp.db`. Set to an empty string to disable persistence.
+  If the key is lost, wipe the persisted state and users re-authenticate once.
+- `SLACK_MCP_DATABASE_URL` (optional): Postgres DSN; takes precedence over SQLite.
+- `SLACK_MCP_DB_PATH` (optional): SQLite file path. Set to an empty string
+  (with no `SLACK_MCP_DATABASE_URL`) to disable persistence entirely.
 
 What does NOT survive a restart: in-flight OAuth flows (pending
 authorizations and unredeemed auth codes) — anyone mid-flow just restarts
@@ -106,20 +118,23 @@ the browser flow.
 
 ## Deployment
 
-For production deployment, you can run it inside docker. Mount a volume at
-`/app/data` so the OAuth state database outlives container replacement:
+For production, run it in a container backed by managed Postgres (no volume
+needed — state lives in the database):
 
 ```bash
 docker build -t slack-mcp .
 docker run -p 8001:8001 \
-  -v slack-mcp-data:/app/data \
-  -e SLACK_CLIENT_ID="your_client_id" \
-  -e SLACK_CLIENT_SECRET="your_client_secret" \
   -e SLACK_MCP_BASE_URI="https://your-domain.com" \
   -e SLACK_EXTERNAL_URL="https://your-domain.com" \
   -e SLACK_MCP_ENCRYPTION_KEY="your_fernet_key" \
+  -e SLACK_MCP_DATABASE_URL="postgresql://user:pass@host:5432/slackmcp" \
+  -e SLACK_TENANTS='[{"id":"...","client_id":"...","client_secret":"...","team_id":"..."}]' \
   slack-mcp
 ```
+
+For a single-instance/local container on SQLite instead, drop
+`SLACK_MCP_DATABASE_URL` and mount a volume at `/app/data` so the database file
+survives container replacement (`-v slack-mcp-data:/app/data`).
 
 ## Development
 

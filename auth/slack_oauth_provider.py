@@ -157,7 +157,7 @@ class SlackOAuthProvider(InMemoryOAuthProvider):
             len(self.access_tokens),
             len(self.refresh_tokens),
             len(self._slack_tokens),
-            store.db_path,
+            store.label,
         )
 
     def _persist_issued_tokens(self, oauth_token: OAuthToken):

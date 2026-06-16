@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 from auth.slack_oauth_provider import SlackOAuthProvider
-from auth.token_store import TokenStore, create_token_store_from_env
+from auth.token_store import SqliteTokenStore, create_token_store_from_env
 from cryptography.fernet import Fernet
 from mcp.server.auth.provider import AuthorizationCode
 from mcp.shared.auth import OAuthClientInformationFull
@@ -25,7 +25,7 @@ CLIENT_SECRET = "dcr-client-secret-456"
 
 
 def make_store(tmp_path, key=KEY):
-    return TokenStore(str(tmp_path / "state.db"), key)
+    return SqliteTokenStore(str(tmp_path / "state.db"), key)
 
 
 def make_provider(store, tenant_id="t1"):
@@ -186,6 +186,8 @@ def test_expired_access_purged_on_boot_but_refresh_path_intact(tmp_path):
 
 
 def test_missing_key_fails_fast(tmp_path, monkeypatch):
+    monkeypatch.delenv("SLACK_MCP_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setenv("SLACK_MCP_DB_PATH", str(tmp_path / "state.db"))
     monkeypatch.delenv("SLACK_MCP_ENCRYPTION_KEY", raising=False)
     with pytest.raises(RuntimeError, match="SLACK_MCP_ENCRYPTION_KEY"):
@@ -193,6 +195,8 @@ def test_missing_key_fails_fast(tmp_path, monkeypatch):
 
 
 def test_empty_db_path_disables_persistence(monkeypatch):
+    monkeypatch.delenv("SLACK_MCP_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setenv("SLACK_MCP_DB_PATH", "")
     assert create_token_store_from_env() is None
 

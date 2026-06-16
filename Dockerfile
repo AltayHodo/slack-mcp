@@ -18,10 +18,13 @@ COPY . .
 # Install dependencies
 RUN uv --quiet sync --frozen
 
-# OAuth state database lives here (SLACK_MCP_DB_PATH defaults to
-# ./data/slack-mcp.db). Mount a volume at /app/data and pass
-# SLACK_MCP_ENCRYPTION_KEY, or state is lost on container replacement:
-#   docker run -v slack-mcp-data:/app/data -e SLACK_MCP_ENCRYPTION_KEY=... slack-mcp
+# OAuth state persistence (always pass SLACK_MCP_ENCRYPTION_KEY):
+#  - Production: set SLACK_MCP_DATABASE_URL to a managed Postgres DSN. State
+#    lives in the database; no volume needed and the container stays stateless,
+#    so this scales to multiple replicas.
+#  - SQLite fallback (single instance): when SLACK_MCP_DATABASE_URL is unset the
+#    DB is a file under /app/data — mount a volume there or state is lost on
+#    container replacement: docker run -v slack-mcp-data:/app/data ... slack-mcp
 RUN mkdir -p /app/data
 VOLUME /app/data
 

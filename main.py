@@ -392,8 +392,14 @@ def main():
     safe_print(f"   📦 Version: {version}")
     safe_print("   🌐 Transport: HTTP (streamable)")
     safe_print(f"   🐍 Python: {sys.version.split()[0]}")
+    db_url = os.getenv("SLACK_MCP_DATABASE_URL") or os.getenv("DATABASE_URL")
     db_path = os.getenv("SLACK_MCP_DB_PATH", "./data/slack-mcp.db")
-    persistence = f"enabled ({db_path})" if db_path else "DISABLED — state lost on restart"
+    if db_url:
+        persistence = "enabled (postgres)"
+    elif db_path:
+        persistence = f"enabled (sqlite: {db_path})"
+    else:
+        persistence = "DISABLED — state lost on restart"
     safe_print(f"   💾 Persistence: {persistence}")
     safe_print(f"   🏢 Tenants: {len(tenants)}")
     for config in tenants:
