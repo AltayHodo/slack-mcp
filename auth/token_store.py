@@ -49,25 +49,90 @@ KEYGEN_HINT = (
 )
 
 _WRONG_KEY_MSG = (
-    "SLACK_MCP_ENCRYPTION_KEY does not match the existing database at {label} "
-    "— refusing to start. Restore the original key, or wipe the persisted "
-    "state to start fresh (users will need to re-authenticate)."
+    "Stored OAuth state at {label} could not be decrypted with the configured "
+    "key — refusing to start. The encryption key (SLACK_MCP_ENCRYPTION_KEY) or "
+    "KMS key (SLACK_MCP_KMS_KEY) may have changed. Restore the original, or wipe "
+    "the persisted state to start fresh (users will need to re-authenticate)."
 )
+
+
+class DecryptionError(Exception):
+    """Raised by a Cipher when ciphertext can't be decrypted (e.g. wrong key)."""
+
+
+class Cipher(abc.ABC):
+    """Encrypts/decrypts the value blobs stored by TokenStore.
+
+    Two implementations: FernetCipher (local/dev/tests, key in env) and
+    KmsCipher (production, key managed by Google Cloud KMS so it never enters
+    the app). Selected by environment in create_token_store_from_env.
+    """
+
+    @abc.abstractmethod
+    def encrypt(self, plaintext: bytes) -> bytes: ...
+
+    @abc.abstractmethod
+    def decrypt(self, ciphertext: bytes) -> bytes:
+        """Return plaintext, or raise DecryptionError if it can't be decrypted."""
+
+
+class FernetCipher(Cipher):
+    def __init__(self, encryption_key: str):
+        # Fernet raises ValueError on a malformed key — fail fast at boot.
+        self._fernet = Fernet(encryption_key)
+
+    def encrypt(self, plaintext: bytes) -> bytes:
+        return self._fernet.encrypt(plaintext)
+
+    def decrypt(self, ciphertext: bytes) -> bytes:
+        try:
+            return self._fernet.decrypt(ciphertext)
+        except InvalidToken as exc:
+            raise DecryptionError from exc
+
+
+class KmsCipher(Cipher):
+    """Envelope-free symmetric encryption via a Google Cloud KMS crypto key.
+
+    Each value is encrypted/decrypted by a KMS API call. Suitable here because
+    writes are low-volume (OAuth lifecycle events, not per request) and values
+    are well under the KMS 64 KiB limit. The key material never leaves KMS;
+    the app only holds the key's resource name and IAM permission to use it.
+    """
+
+    def __init__(self, key_name: str):
+        # Lazy import so SQLite/Fernet-only environments don't need the dep.
+        from google.cloud import kms
+
+        self._key_name = key_name
+        self._client = kms.KeyManagementServiceClient()
+
+    def encrypt(self, plaintext: bytes) -> bytes:
+        resp = self._client.encrypt(request={"name": self._key_name, "plaintext": plaintext})
+        return resp.ciphertext
+
+    def decrypt(self, ciphertext: bytes) -> bytes:
+        try:
+            resp = self._client.decrypt(
+                request={"name": self._key_name, "ciphertext": ciphertext}
+            )
+            return resp.plaintext
+        except Exception as exc:  # GoogleAPIError, wrong key, malformed, etc.
+            raise DecryptionError from exc
 
 
 class TokenStore(abc.ABC):
     """Encrypted key-value store for OAuth state.
 
-    The base class owns Fernet encryption and the public API; subclasses
-    implement the four low-level row operations against a concrete backend.
-    One instance is shared by every tenant provider; rows are namespaced by
-    tenant_id. Writes happen only on OAuth lifecycle events (register, code
-    exchange, refresh, revoke) — never per tool call.
+    The base class owns encryption (via an injected Cipher) and the public API;
+    subclasses implement the four low-level row operations against a concrete
+    backend. One instance is shared by every tenant provider; rows are
+    namespaced by tenant_id. Writes happen only on OAuth lifecycle events
+    (register, code exchange, refresh, revoke) — never per tool call.
     """
 
-    def __init__(self, encryption_key: str):
-        # Fernet raises ValueError on a malformed key — fail fast at boot.
-        self._fernet = Fernet(encryption_key)
+    def __init__(self, cipher: Cipher):
+        self._cipher = cipher
 
     @property
     @abc.abstractmethod
@@ -82,14 +147,14 @@ class TokenStore(abc.ABC):
         value: str,
         expires_at: float | None = None,
     ) -> None:
-        self._upsert(tenant_id, kind, key, self._fernet.encrypt(value.encode()), expires_at)
+        self._upsert(tenant_id, kind, key, self._cipher.encrypt(value.encode()), expires_at)
 
     def get_all(self, tenant_id: str, kind: str) -> dict[str, str]:
         result: dict[str, str] = {}
         for key, encrypted in self._select_all(tenant_id, kind):
             try:
-                result[key] = self._fernet.decrypt(bytes(encrypted)).decode()
-            except InvalidToken as exc:
+                result[key] = self._cipher.decrypt(bytes(encrypted)).decode()
+            except DecryptionError as exc:
                 # Never silently drop rows: a wrong key would otherwise look
                 # like an empty store and quietly log everyone out.
                 raise RuntimeError(_WRONG_KEY_MSG.format(label=self.label)) from exc
@@ -141,8 +206,8 @@ _SQLITE_SCHEMA_VERSION = 1
 class SqliteTokenStore(TokenStore):
     """File-backed store for local development and tests."""
 
-    def __init__(self, db_path: str, encryption_key: str):
-        super().__init__(encryption_key)
+    def __init__(self, db_path: str, cipher: Cipher):
+        super().__init__(cipher)
 
         parent = os.path.dirname(os.path.abspath(db_path))
         os.makedirs(parent, exist_ok=True)
@@ -233,8 +298,8 @@ class PostgresTokenStore(TokenStore):
     Proxy/sidecar, so the app just needs a normal DSN pointing at it.
     """
 
-    def __init__(self, conninfo: str, encryption_key: str):
-        super().__init__(encryption_key)
+    def __init__(self, conninfo: str, cipher: Cipher):
+        super().__init__(cipher)
 
         # Imported lazily so SQLite-only environments don't need psycopg.
         from psycopg_pool import ConnectionPool
@@ -311,6 +376,28 @@ def _sanitize_dsn(conninfo: str) -> str:
         return "postgresql (configured)"
 
 
+def create_cipher_from_env() -> Cipher:
+    """Build the encryption Cipher from environment configuration.
+
+    SLACK_MCP_KMS_KEY (a Cloud KMS crypto key resource name) selects KMS for
+    production; otherwise SLACK_MCP_ENCRYPTION_KEY selects Fernet for local/dev.
+    """
+    kms_key = os.getenv("SLACK_MCP_KMS_KEY")
+    if kms_key:
+        return KmsCipher(kms_key)
+
+    encryption_key = os.getenv("SLACK_MCP_ENCRYPTION_KEY")
+    if encryption_key:
+        return FernetCipher(encryption_key)
+
+    raise RuntimeError(
+        "Persistence is enabled but no encryption key is configured. Set "
+        "SLACK_MCP_KMS_KEY (production, Cloud KMS) or SLACK_MCP_ENCRYPTION_KEY "
+        f"(local/dev — generate with:\n  {KEYGEN_HINT}\n). Or disable persistence "
+        "by setting SLACK_MCP_DB_PATH to an empty string with no SLACK_MCP_DATABASE_URL."
+    )
+
+
 def create_token_store_from_env() -> TokenStore | None:
     """Build the shared TokenStore from environment configuration.
 
@@ -320,7 +407,8 @@ def create_token_store_from_env() -> TokenStore | None:
         ./data/slack-mcp.db)
       - else                                          -> persistence disabled
 
-    SLACK_MCP_ENCRYPTION_KEY is required whenever persistence is enabled.
+    Encryption (see create_cipher_from_env) is required whenever persistence is
+    enabled: KMS in production, Fernet locally.
     """
     db_url = os.getenv("SLACK_MCP_DATABASE_URL") or os.getenv("DATABASE_URL")
     db_path = os.getenv("SLACK_MCP_DB_PATH", "./data/slack-mcp.db")
@@ -332,16 +420,8 @@ def create_token_store_from_env() -> TokenStore | None:
         )
         return None
 
-    encryption_key = os.getenv("SLACK_MCP_ENCRYPTION_KEY")
-    if not encryption_key:
-        target = "SLACK_MCP_DATABASE_URL" if db_url else f"SLACK_MCP_DB_PATH={db_path!r}"
-        raise RuntimeError(
-            "SLACK_MCP_ENCRYPTION_KEY is required when persistence is enabled "
-            f"({target}). Generate one with:\n  {KEYGEN_HINT}\n"
-            "Or set SLACK_MCP_DB_PATH to an empty string (and unset "
-            "SLACK_MCP_DATABASE_URL) to disable persistence."
-        )
+    cipher = create_cipher_from_env()
 
     if db_url:
-        return PostgresTokenStore(db_url, encryption_key)
-    return SqliteTokenStore(db_path, encryption_key)
+        return PostgresTokenStore(db_url, cipher)
+    return SqliteTokenStore(db_path, cipher)

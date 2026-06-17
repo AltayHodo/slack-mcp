@@ -69,6 +69,7 @@ class SlackOAuthProvider(InMemoryOAuthProvider):
         slack_team_id: str | None = None,
         tenant_id: str = "",
         token_store: TokenStore | None = None,
+        allowed_email_domains: list[str] | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -80,6 +81,15 @@ class SlackOAuthProvider(InMemoryOAuthProvider):
         # the OAuth flow to this workspace so a multi-tenant deployment routes
         # each mount to its intended workspace deterministically.
         self._slack_team_id = slack_team_id
+        # Optional allowlist of email domains (lowercased). When set, only users
+        # whose Slack profile email matches one of these domains may complete
+        # auth — e.g. restrict the fellow workspace to Handshake employees, since
+        # workspace membership alone includes fellows. Empty/None = no restriction.
+        self._allowed_email_domains = (
+            {d.strip().lower() for d in allowed_email_domains if d.strip()}
+            if allowed_email_domains
+            else None
+        )
 
         # internal_state -> {client_id, redirect_uri, state, code_challenge, scopes, created_at}
         self._pending_authorizations: dict[str, dict] = {}
@@ -423,6 +433,33 @@ class SlackOAuthProvider(InMemoryOAuthProvider):
                         pending,
                         "access_denied",
                         "Authorized in the wrong Slack workspace for this connector.",
+                    )
+
+            # Restrict to allowed email domains (e.g. Handshake employees only).
+            # Workspace membership isn't a sufficient gate — the fellow workspace
+            # includes fellows — so verify the user's profile email domain. Fails
+            # closed: a missing/unreadable email is rejected when a restriction
+            # is configured.
+            if self._allowed_email_domains:
+                try:
+                    info = await asyncio.to_thread(
+                        WebClient(token=slack_token).users_info, user=slack_user_id
+                    )
+                    email = (info.get("user", {}).get("profile", {}) or {}).get("email", "")
+                except Exception as e:
+                    logger.error("Failed to fetch user email for domain check: %s", e)
+                    email = ""
+                domain = email.rsplit("@", 1)[-1].lower() if "@" in email else ""
+                if domain not in self._allowed_email_domains:
+                    logger.warning(
+                        "Rejected user %s: email domain %r not in allowlist",
+                        slack_user_id,
+                        domain or "<none>",
+                    )
+                    return self._error_redirect(
+                        pending,
+                        "access_denied",
+                        "Your Slack account is not permitted to use this connector.",
                     )
 
             logger.info("Got Slack token for user %s", slack_user_id)

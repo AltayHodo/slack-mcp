@@ -7,14 +7,13 @@ on (DCR registration, tokens, Slack token association) is restored.
 """
 
 import asyncio
-import json
 import sqlite3
 import time
 from pathlib import Path
 
 import pytest
 from auth.slack_oauth_provider import SlackOAuthProvider
-from auth.token_store import SqliteTokenStore, create_token_store_from_env
+from auth.token_store import FernetCipher, SqliteTokenStore, create_token_store_from_env
 from cryptography.fernet import Fernet
 from mcp.server.auth.provider import AuthorizationCode
 from mcp.shared.auth import OAuthClientInformationFull
@@ -25,7 +24,7 @@ CLIENT_SECRET = "dcr-client-secret-456"
 
 
 def make_store(tmp_path, key=KEY):
-    return SqliteTokenStore(str(tmp_path / "state.db"), key)
+    return SqliteTokenStore(str(tmp_path / "state.db"), FernetCipher(key))
 
 
 def make_provider(store, tenant_id="t1"):
@@ -206,7 +205,7 @@ def test_wrong_key_fails_fast(tmp_path):
     asyncio.run(provider.register_client(make_client()))
 
     other_key = Fernet.generate_key().decode()
-    with pytest.raises(RuntimeError, match="does not match"):
+    with pytest.raises(RuntimeError, match="could not be decrypted"):
         make_provider(make_store(tmp_path, key=other_key))
 
 

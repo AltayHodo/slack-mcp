@@ -230,6 +230,12 @@ def configure_oauth(
     from auth.slack_oauth_provider import SlackOAuthProvider
     from mcp.server.auth.settings import ClientRegistrationOptions
 
+    # Optional Handshaker-only gate: comma-separated allowed email domains.
+    # Unset = no restriction (local/dev); prod sets e.g. "joinhandshake.com".
+    allowed_email_domains = [
+        d for d in os.getenv("SLACK_MCP_ALLOWED_EMAIL_DOMAINS", "").split(",") if d.strip()
+    ]
+
     provider = SlackOAuthProvider(
         slack_client_id=config.client_id,
         slack_client_secret=config.client_secret,
@@ -238,6 +244,7 @@ def configure_oauth(
         slack_team_id=config.team_id,
         tenant_id=config.tenant_id,
         token_store=token_store,
+        allowed_email_domains=allowed_email_domains,
         base_url=config.get_oauth_base_url(),
         required_scopes=sorted(config.scopes),
         client_registration_options=ClientRegistrationOptions(

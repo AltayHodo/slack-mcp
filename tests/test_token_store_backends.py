@@ -15,6 +15,7 @@ import pytest
 from auth.token_store import (
     KIND_CLIENT,
     KIND_SLACK_TOKEN,
+    FernetCipher,
     PostgresTokenStore,
     SqliteTokenStore,
 )
@@ -34,9 +35,9 @@ pg_param = pytest.param(
 def store(request, tmp_path):
     """Yield a fresh store for each backend; clean up after."""
     if request.param == "sqlite":
-        s = SqliteTokenStore(str(tmp_path / "state.db"), KEY)
+        s = SqliteTokenStore(str(tmp_path / "state.db"), FernetCipher(KEY))
     else:
-        s = PostgresTokenStore(PG_URL, KEY)
+        s = PostgresTokenStore(PG_URL, FernetCipher(KEY))
     yield s
     s.close()
 
@@ -110,11 +111,11 @@ def test_wrong_key_raises(store, tmp_path):
 
     other_key = Fernet.generate_key().decode()
     if isinstance(store, SqliteTokenStore):
-        reopened = SqliteTokenStore(store.db_path, other_key)
+        reopened = SqliteTokenStore(store.db_path, FernetCipher(other_key))
     else:
-        reopened = PostgresTokenStore(PG_URL, other_key)
+        reopened = PostgresTokenStore(PG_URL, FernetCipher(other_key))
     try:
-        with pytest.raises(RuntimeError, match="does not match"):
+        with pytest.raises(RuntimeError, match="could not be decrypted"):
             reopened.get_all(t, KIND_CLIENT)
     finally:
         reopened.close()

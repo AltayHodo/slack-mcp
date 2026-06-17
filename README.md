@@ -91,10 +91,10 @@ Authentication happens automatically via OAuth 2.1 when your MCP client first co
 OAuth state — DCR client registrations, MCP access/refresh tokens, and the
 Slack user tokens they map to — is persisted so server restarts don't log
 everyone out (or worse, invalidate the client registration MCP clients cache,
-which forces users to re-add the connector under a new name). Values are
-encrypted at rest with a Fernet key regardless of backend.
+which forces users to re-add the connector under a new name). Stored values
+are encrypted at rest regardless of backend.
 
-Two backends are supported, selected by environment:
+Two storage backends are supported, selected by environment:
 
 - **Postgres** (production) — set `SLACK_MCP_DATABASE_URL` to a libpq
   connection string. Use this for any hosted/multi-replica deployment; state
@@ -103,11 +103,20 @@ Two backends are supported, selected by environment:
   is unset. `SLACK_MCP_DB_PATH` sets the file path (default
   `./data/slack-mcp.db`); requires a persistent volume in a container.
 
+Two encryption backends, selected by environment:
+
+- **Cloud KMS** (production) — set `SLACK_MCP_KMS_KEY` to a KMS crypto key
+  resource name (`projects/.../locations/.../keyRings/.../cryptoKeys/...`).
+  Key material stays in KMS; the app only holds permission to use it.
+- **Fernet** (local dev) — set `SLACK_MCP_ENCRYPTION_KEY` to a Fernet key.
+  Used when `SLACK_MCP_KMS_KEY` is unset.
+
 Settings:
 
-- `SLACK_MCP_ENCRYPTION_KEY` (required for either backend): generate with
-  `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
-  If the key is lost, wipe the persisted state and users re-authenticate once.
+- Encryption (one required when persistence is on): `SLACK_MCP_KMS_KEY` (takes
+  precedence) or `SLACK_MCP_ENCRYPTION_KEY` (generate with
+  `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`).
+  If the key is lost/changed, wipe the persisted state and users re-authenticate.
 - `SLACK_MCP_DATABASE_URL` (optional): Postgres DSN; takes precedence over SQLite.
 - `SLACK_MCP_DB_PATH` (optional): SQLite file path. Set to an empty string
   (with no `SLACK_MCP_DATABASE_URL`) to disable persistence entirely.
@@ -115,6 +124,17 @@ Settings:
 What does NOT survive a restart: in-flight OAuth flows (pending
 authorizations and unredeemed auth codes) — anyone mid-flow just restarts
 the browser flow.
+
+## Access control
+
+`SLACK_MCP_ALLOWED_EMAIL_DOMAINS` (optional, comma-separated) restricts who may
+complete authentication. When set, after OAuth the server checks the user's
+Slack profile email domain and rejects anyone outside the list (failing closed
+if no email is readable). Use this to limit a workspace that includes
+non-employees (e.g. a fellow/community workspace) to employees only, e.g.
+`SLACK_MCP_ALLOWED_EMAIL_DOMAINS=joinhandshake.com`. Unset = no restriction
+(workspace membership is the only gate). Requires the `users:read.email` scope
+(included by default).
 
 ## Deployment
 

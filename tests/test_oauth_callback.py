@@ -19,7 +19,7 @@ OTHER = "T_OTHER"
 REDIRECT = "http://localhost:9000/callback"
 
 
-def make_provider(team_id=PINNED):
+def make_provider(team_id=PINNED, allowed_email_domains=None):
     return SlackOAuthProvider(
         slack_client_id="cid",
         slack_client_secret="sec",
@@ -27,6 +27,7 @@ def make_provider(team_id=PINNED):
         slack_scopes=["search:read"],
         slack_team_id=team_id,
         tenant_id="internal",
+        allowed_email_domains=allowed_email_domains,
     )
 
 
@@ -49,8 +50,9 @@ def seed_pending(provider, state="state123", client_id="client-1"):
     )
 
 
-def patch_slack(monkeypatch, team_id):
-    """Stub WebClient().oauth_v2_access to return a token for `team_id`."""
+def patch_slack(monkeypatch, team_id, email="user@joinhandshake.com"):
+    """Stub WebClient so oauth_v2_access returns a token for `team_id` and
+    users_info returns a profile with `email`."""
     response = {
         "ok": True,
         "authed_user": {"access_token": "xoxp-secret", "id": "U1"},
@@ -60,6 +62,9 @@ def patch_slack(monkeypatch, team_id):
     class _Fake:
         def oauth_v2_access(self, **kwargs):
             return response
+
+        def users_info(self, **kwargs):
+            return {"user": {"profile": {"email": email}}}
 
     monkeypatch.setattr(provider_mod, "WebClient", lambda *a, **k: _Fake())
 
@@ -124,6 +129,42 @@ def test_callback_rejects_missing_team_when_pinned(monkeypatch):
             return {"ok": True, "authed_user": {"access_token": "xoxp-secret", "id": "U1"}}
 
     monkeypatch.setattr(provider_mod, "WebClient", lambda *a, **k: _Fake())
+
+    resp = asyncio.run(provider._handle_slack_callback(make_request()))
+
+    assert isinstance(resp, HTMLResponse)
+    assert "access_denied" in resp.body.decode()
+    assert provider._slack_tokens == {}
+
+
+def test_callback_allows_matching_email_domain(monkeypatch):
+    provider = make_provider(team_id=PINNED, allowed_email_domains=["joinhandshake.com"])
+    seed_pending(provider)
+    patch_slack(monkeypatch, team_id=PINNED, email="alice@joinhandshake.com")
+
+    resp = asyncio.run(provider._handle_slack_callback(make_request()))
+
+    assert isinstance(resp, HTMLResponse)
+    code_keys = [k for k in provider._slack_tokens if k.startswith("code:")]
+    assert len(code_keys) == 1
+
+
+def test_callback_rejects_wrong_email_domain(monkeypatch):
+    provider = make_provider(team_id=PINNED, allowed_email_domains=["joinhandshake.com"])
+    seed_pending(provider)
+    patch_slack(monkeypatch, team_id=PINNED, email="fellow@gmail.com")
+
+    resp = asyncio.run(provider._handle_slack_callback(make_request()))
+
+    assert isinstance(resp, HTMLResponse)
+    assert "access_denied" in resp.body.decode()
+    assert provider._slack_tokens == {}
+
+
+def test_callback_rejects_missing_email_when_gated(monkeypatch):
+    provider = make_provider(team_id=PINNED, allowed_email_domains=["joinhandshake.com"])
+    seed_pending(provider)
+    patch_slack(monkeypatch, team_id=PINNED, email="")  # no email returned → fail closed
 
     resp = asyncio.run(provider._handle_slack_callback(make_request()))
 
